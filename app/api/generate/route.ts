@@ -5,7 +5,7 @@ export async function POST(req: NextRequest) {
   // Lazy-init Supabase inside the handler so env vars are read at request time
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    process.env.SUPABASE_SERVICE_KEY!
   );
   try {
     const { scadCode, fileName } = await req.json();
