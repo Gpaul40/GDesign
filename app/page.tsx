@@ -68,9 +68,13 @@ export default function Home() {
   const [isRerendering, setIsRerendering] = useState(false);
   const [strategy, setStrategy] = useState<GenerationStrategy | ''>('');
   const [category, setCategory] = useState<PromptCategory | ''>('');
+  const [generateProgress, setGenerateProgress] = useState(0);
+  const [generateStatus, setGenerateStatus] = useState('');
+  const [statusHistory, setStatusHistory] = useState<string[]>([]);
+  const [rewriteStatus, setRewriteStatus] = useState('');
+  const previousGenerateStatusRef = useRef('');
 
   const rewriteProgress = useProgress(step === 'rewriting', 15000, 92);
-  const generateProgress = useProgress(step === 'generating', RENDER_DURATION, 92);
   const rerenderProgress = useProgress(isRerendering, RENDER_DURATION, 92);
 
   const displayProgress = step === 'rewriting'
@@ -81,6 +85,90 @@ export default function Home() {
 
   const safeName = formatFileName(prompt);
   const isLoading = step === 'rewriting' || step === 'generating' || isRerendering;
+
+  useEffect(() => {
+    if (!generateStatus) return;
+
+    const previousStatus = previousGenerateStatusRef.current;
+    if (previousStatus && previousStatus !== generateStatus) {
+      setStatusHistory((current) =>
+        current[current.length - 1] === previousStatus ? current : [...current, previousStatus]
+      );
+    }
+
+    previousGenerateStatusRef.current = generateStatus;
+  }, [generateStatus]);
+
+  const resetGenerateStreamingState = () => {
+    previousGenerateStatusRef.current = '';
+    setGenerateProgress(0);
+    setGenerateStatus('');
+    setStatusHistory([]);
+  };
+
+  const streamGeneration = async (nextScadCode: string, nextFileName: string) => {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scadCode: nextScadCode, fileName: nextFileName }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || 'Generation failed');
+    }
+
+    if (!res.body) {
+      throw new Error('Streaming response unavailable');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result: { stlUrl?: string; scadUrl?: string } = {};
+
+    const processChunk = (chunk: string) => {
+      for (const line of chunk.split('\n').filter((entry) => entry.startsWith('data: '))) {
+        const data = JSON.parse(line.slice(6)) as {
+          error?: string;
+          progress?: number;
+          status?: string;
+          stlUrl?: string;
+          scadUrl?: string;
+        };
+
+        if (data.error) throw new Error(data.error);
+        if (data.progress !== undefined) setGenerateProgress(data.progress);
+        if (data.status) setGenerateStatus(data.status);
+        if (data.stlUrl) {
+          result = { stlUrl: data.stlUrl, scadUrl: data.scadUrl };
+        }
+      }
+    };
+
+    while (true) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+
+      for (const event of events) {
+        processChunk(event);
+      }
+    }
+
+    if (buffer.trim()) {
+      processChunk(buffer);
+    }
+
+    if (!result.stlUrl || !result.scadUrl) {
+      throw new Error('Generation completed without output URLs');
+    }
+
+    return { stlUrl: result.stlUrl, scadUrl: result.scadUrl };
+  };
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
@@ -97,6 +185,8 @@ export default function Home() {
     setIsRerendering(false);
     setStrategy('');
     setCategory('');
+    setRewriteStatus('🧠 Analysing your prompt...');
+    resetGenerateStreamingState();
 
     try {
       const res = await fetch('/api/rewrite', {
@@ -107,22 +197,27 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rewrite failed');
       const parsedParams = parseScadParams(data.scadCode);
+      setRewriteStatus(`📋 Detected: ${data.category}...`);
+      await wait(400);
+      setRewriteStatus('✍️ Generating OpenSCAD code...');
+      await wait(400);
       setDone(true);
-      setTimeout(() => {
-        setDescription(data.description);
-        setScadCode(data.scadCode);
-        setBaseParams(parsedParams);
-        setCustomParams(parsedParams);
-        setActivePreset('medium');
-        setStrategy(data.strategy);
-        setCategory(data.category);
-        setStep('review');
-        setDone(false);
-      }, 300);
+      setRewriteStatus('✅ Code ready for review!');
+      await wait(300);
+      setDescription(data.description);
+      setScadCode(data.scadCode);
+      setBaseParams(parsedParams);
+      setCustomParams(parsedParams);
+      setActivePreset('medium');
+      setStrategy(data.strategy);
+      setCategory(data.category);
+      setStep('review');
+      setDone(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
       setStep('idle');
       setDone(false);
+      setRewriteStatus('');
     }
   };
 
@@ -130,26 +225,16 @@ export default function Home() {
     setError('');
     setDone(false);
     setStep('generating');
+    resetGenerateStreamingState();
 
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scadCode, fileName: safeName }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Generation failed');
-      setDone(true);
-      setTimeout(() => {
-        setStlUrl(data.stlUrl);
-        setScadUrl(data.scadUrl);
-        setStep('preview');
-        setDone(false);
-      }, 300);
+      const data = await streamGeneration(scadCode, safeName);
+      setStlUrl(data.stlUrl);
+      setScadUrl(data.scadUrl);
+      setStep('preview');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
       setStep('review');
-      setDone(false);
     }
   };
 
@@ -180,19 +265,10 @@ export default function Home() {
 
     setError('');
     setIsRerendering(true);
+    resetGenerateStreamingState();
 
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scadCode: nextScadCode,
-          fileName: `${safeName}_${Date.now()}`,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Re-render failed');
-
+      const data = await streamGeneration(nextScadCode, `${safeName}_${Date.now()}`);
       setScadCode(nextScadCode);
       setStlUrl(data.stlUrl);
       setScadUrl(data.scadUrl);
@@ -219,6 +295,8 @@ export default function Home() {
     setIsRerendering(false);
     setStrategy('');
     setCategory('');
+    setRewriteStatus('');
+    resetGenerateStreamingState();
   };
 
   return (
@@ -249,7 +327,7 @@ export default function Home() {
               className="flex-1 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 transition overflow-hidden relative"
             >
               {step === 'rewriting' ? (
-                <ProgressButton label="Generating OpenSCAD…" progress={displayProgress} />
+                <ProgressButton label={rewriteStatus || 'Generating OpenSCAD…'} progress={displayProgress} />
               ) : (
                 'Generate'
               )}
@@ -314,16 +392,27 @@ export default function Home() {
             )}
 
             {step === 'generating' && (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-sm text-slate-400">
-                  <span className="flex items-center gap-2"><Spinner /> Rendering STL and uploading…</span>
-                  <span className="font-mono text-sky-400 font-semibold">{displayProgress}%</span>
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="flex items-center gap-2 text-slate-300">
+                    <Spinner />
+                    <span>{generateStatus || 'Starting...'}</span>
+                  </span>
+                  <span className="font-mono text-sky-400 font-semibold">{generateProgress}%</span>
                 </div>
-                <div className="w-full bg-slate-700 rounded-full h-1.5">
+                <div className="w-full bg-slate-700 rounded-full h-2">
                   <div
-                    className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
-                    style={{ width: `${displayProgress}%` }}
+                    className="bg-gradient-to-r from-sky-500 to-emerald-500 h-2 rounded-full transition-all duration-500"
+                    style={{ width: `${generateProgress}%` }}
                   />
+                </div>
+                <div className="flex flex-col gap-1 mt-1">
+                  {statusHistory.map((msg, i) => (
+                    <div key={i} className="text-xs text-slate-500 flex items-center gap-2">
+                      <span className="text-emerald-500">✓</span>
+                      <span>{msg}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -495,6 +584,10 @@ function Spinner() {
       />
     </svg>
   );
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function SlidersIcon() {
