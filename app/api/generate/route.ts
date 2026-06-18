@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     // Upload .scad to Supabase Storage
     const scadPath = `${baseName}.scad`;
     const { error: scadUploadError } = await supabase.storage
-      .from('models')
+      .from('GDesign')
       .upload(scadPath, new Blob([scadCode], { type: 'text/plain' }), {
         upsert: true,
         contentType: 'text/plain',
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
     // Upload .stl to Supabase Storage
     const stlPath = `${baseName}.stl`;
     const { error: stlUploadError } = await supabase.storage
-      .from('models')
+      .from('GDesign')
       .upload(stlPath, new Blob([stlBuffer], { type: 'model/stl' }), {
         upsert: true,
         contentType: 'model/stl',
@@ -71,8 +71,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { data: scadUrlData } = supabase.storage.from('models').getPublicUrl(scadPath);
-    const { data: stlUrlData } = supabase.storage.from('models').getPublicUrl(stlPath);
+    const { data: scadUrlData } = supabase.storage.from('GDesign').getPublicUrl(scadPath);
+    const { data: stlUrlData } = supabase.storage.from('GDesign').getPublicUrl(stlPath);
 
     return NextResponse.json({
       stlUrl: stlUrlData.publicUrl,
