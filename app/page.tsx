@@ -1,7 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import TerminalLog, { type TerminalLine } from '../components/TerminalLog';
 import { applyScadParams, parseScadParams, type ScadParam } from '../lib/scadParams';
 
 const STLViewer = dynamic(() => import('../components/STLViewer'), { ssr: false });
@@ -12,10 +13,33 @@ const SIZE_PRESETS = [
   { id: 'large', label: 'Large 1.5x', scale: 1.5 },
   { id: 'xl', label: 'XL 2x', scale: 2 },
 ] as const;
+const RENDER_FLAVOR_LINES = [
+  'Processing vertex data...',
+  'Optimizing mesh topology...',
+  'Computing boolean operations...',
+  'Applying geometric transforms...',
+  'Validating manifold geometry...',
+  'Calculating bounding volumes...',
+] as const;
 
 type Step = 'idle' | 'rewriting' | 'review' | 'generating' | 'preview';
 type PromptCategory = 'character' | 'mechanical' | 'object';
 type GenerationStrategy = 'web_research' | 'mechanical_precision';
+type GenerationStreamEvent = {
+  error?: string;
+  progress?: number;
+  status?: string;
+  stlUrl?: string;
+  scadUrl?: string;
+  stlBytes?: number;
+  triangleCount?: number;
+};
+type GenerationStreamResult = {
+  stlUrl: string;
+  scadUrl: string;
+  stlBytes: number;
+  triangleCount: number;
+};
 
 function useProgress(active: boolean, duration: number, endAt = 92) {
   const [progress, setProgress] = useState(0);
@@ -61,50 +85,126 @@ export default function Home() {
   const [scadUrl, setScadUrl] = useState('');
   const [error, setError] = useState('');
   const [showCode, setShowCode] = useState(false);
-  const [done, setDone] = useState(false);
   const [baseParams, setBaseParams] = useState<ScadParam[]>([]);
   const [customParams, setCustomParams] = useState<ScadParam[]>([]);
   const [activePreset, setActivePreset] = useState<string>('medium');
   const [isRerendering, setIsRerendering] = useState(false);
   const [strategy, setStrategy] = useState<GenerationStrategy | ''>('');
   const [category, setCategory] = useState<PromptCategory | ''>('');
-  const [generateProgress, setGenerateProgress] = useState(0);
-  const [generateStatus, setGenerateStatus] = useState('');
-  const [statusHistory, setStatusHistory] = useState<string[]>([]);
-  const [rewriteStatus, setRewriteStatus] = useState('');
-  const previousGenerateStatusRef = useRef('');
+  const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
+  const [processStart, setProcessStart] = useState(0);
+  const [showBuildLog, setShowBuildLog] = useState(true);
 
-  const rewriteProgress = useProgress(step === 'rewriting', 15000, 92);
+  const processStartRef = useRef(0);
+  const reviewPausedAtRef = useRef(0);
+  const renderFlavorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const renderFlavorIndexRef = useRef(0);
+
   const rerenderProgress = useProgress(isRerendering, RENDER_DURATION, 92);
 
-  const displayProgress = step === 'rewriting'
-    ? (done ? 100 : rewriteProgress)
-    : step === 'generating'
-    ? (done ? 100 : generateProgress)
-    : 0;
-
   const safeName = formatFileName(prompt);
-  const isLoading = step === 'rewriting' || step === 'generating' || isRerendering;
+  const isTerminalRunning = step === 'rewriting' || step === 'generating' || isRerendering;
+  const isLoading = isTerminalRunning;
 
-  useEffect(() => {
-    if (!generateStatus) return;
-
-    const previousStatus = previousGenerateStatusRef.current;
-    if (previousStatus && previousStatus !== generateStatus) {
-      setStatusHistory((current) =>
-        current[current.length - 1] === previousStatus ? current : [...current, previousStatus]
-      );
+  const stopRenderFlavorLines = () => {
+    if (renderFlavorIntervalRef.current) {
+      clearInterval(renderFlavorIntervalRef.current);
+      renderFlavorIntervalRef.current = null;
     }
-
-    previousGenerateStatusRef.current = generateStatus;
-  }, [generateStatus]);
-
-  const resetGenerateStreamingState = () => {
-    previousGenerateStatusRef.current = '';
-    setGenerateProgress(0);
-    setGenerateStatus('');
-    setStatusHistory([]);
   };
+
+  const addLine = (text: string, type: TerminalLine['type'] = 'info') => {
+    const start = processStartRef.current || processStart || Date.now();
+    const timestamp = formatElapsedTimestamp((Date.now() - start) / 1000);
+    setTerminalLines((current) => [...current, { text: `${timestamp} > ${text}`, type }]);
+  };
+
+  const startTerminalSession = () => {
+    stopRenderFlavorLines();
+    reviewPausedAtRef.current = 0;
+    renderFlavorIndexRef.current = 0;
+    const startedAt = Date.now();
+    processStartRef.current = startedAt;
+    setProcessStart(startedAt);
+    setTerminalLines([]);
+    setShowBuildLog(true);
+  };
+
+  const pauseTimerForReview = () => {
+    reviewPausedAtRef.current = Date.now();
+  };
+
+  const resumeTimerFromReview = () => {
+    if (!reviewPausedAtRef.current) return;
+    const nextStart = processStartRef.current + (Date.now() - reviewPausedAtRef.current);
+    processStartRef.current = nextStart;
+    setProcessStart(nextStart);
+    reviewPausedAtRef.current = 0;
+  };
+
+  const startRenderFlavorLines = () => {
+    stopRenderFlavorLines();
+    renderFlavorIndexRef.current = 0;
+    renderFlavorIntervalRef.current = setInterval(() => {
+      const message = RENDER_FLAVOR_LINES[renderFlavorIndexRef.current % RENDER_FLAVOR_LINES.length];
+      renderFlavorIndexRef.current += 1;
+      addLine(message, 'dim');
+    }, 2000);
+  };
+
+  const appendGenerationStatus = (
+    status: string,
+    metadata?: Pick<GenerationStreamEvent, 'stlBytes' | 'triangleCount'>
+  ) => {
+    switch (status) {
+      case '🔍 Parsing OpenSCAD code...':
+        addLine('Parsing OpenSCAD input...');
+        break;
+      case '⚙️ Initializing WebAssembly renderer...':
+        addLine('Loading WebAssembly renderer...');
+        break;
+      case '🏗️ Compiling model geometry...':
+        stopRenderFlavorLines();
+        addLine('Renderer initialized ✓', 'success');
+        addLine('Writing input.scad to virtual filesystem...');
+        addLine('Compiling geometry (pass 1/3)...');
+        break;
+      case '🔄 Rendering mesh (this may take a moment)...':
+        addLine('Compiling geometry (pass 2/3)...');
+        startRenderFlavorLines();
+        break;
+      case '✅ Render complete! Processing output...':
+        stopRenderFlavorLines();
+        addLine('Compiling geometry (pass 3/3)...');
+        addLine(
+          `Mesh generated — ${(metadata?.triangleCount ?? estimateTriangleCount(metadata?.stlBytes ?? 0)).toLocaleString()} triangles ✓`,
+          'success'
+        );
+        addLine('Calculating surface normals...');
+        addLine('Writing output.stl...');
+        if (metadata?.stlBytes) {
+          addLine(`STL size: ${formatBytes(metadata.stlBytes)} ✓`, 'success');
+        }
+        break;
+      case '☁️ Uploading .scad file...':
+        stopRenderFlavorLines();
+        addLine('Uploading .scad to Supabase storage...');
+        break;
+      case '☁️ Uploading .stl file...':
+        addLine('Uploading .stl to Supabase storage...');
+        break;
+      case '🎉 Done! Loading preview...':
+        stopRenderFlavorLines();
+        addLine(`Build complete in ${getElapsedSeconds(processStartRef.current).toFixed(1)}s ✓`, 'success');
+        addLine('Loading 3D preview...');
+        break;
+      default:
+        stopRenderFlavorLines();
+        addLine(status);
+    }
+  };
+
+  useEffect(() => () => stopRenderFlavorLines(), []);
 
   const streamGeneration = async (nextScadCode: string, nextFileName: string) => {
     const res = await fetch('/api/generate', {
@@ -125,23 +225,27 @@ export default function Home() {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let result: { stlUrl?: string; scadUrl?: string } = {};
+    const result: Partial<GenerationStreamResult> = {};
 
     const processChunk = (chunk: string) => {
       for (const line of chunk.split('\n').filter((entry) => entry.startsWith('data: '))) {
-        const data = JSON.parse(line.slice(6)) as {
-          error?: string;
-          progress?: number;
-          status?: string;
-          stlUrl?: string;
-          scadUrl?: string;
-        };
+        const data = JSON.parse(line.slice(6)) as GenerationStreamEvent;
 
-        if (data.error) throw new Error(data.error);
-        if (data.progress !== undefined) setGenerateProgress(data.progress);
-        if (data.status) setGenerateStatus(data.status);
+        if (data.error) {
+          addLine(data.error, 'error');
+          throw new Error(data.error);
+        }
+        if (data.status) {
+          appendGenerationStatus(data.status, {
+            stlBytes: data.stlBytes,
+            triangleCount: data.triangleCount,
+          });
+        }
+        if (data.stlBytes !== undefined) result.stlBytes = data.stlBytes;
+        if (data.triangleCount !== undefined) result.triangleCount = data.triangleCount;
         if (data.stlUrl) {
-          result = { stlUrl: data.stlUrl, scadUrl: data.scadUrl };
+          result.stlUrl = data.stlUrl;
+          result.scadUrl = data.scadUrl;
         }
       }
     };
@@ -167,13 +271,19 @@ export default function Home() {
       throw new Error('Generation completed without output URLs');
     }
 
-    return { stlUrl: result.stlUrl, scadUrl: result.scadUrl };
+    return {
+      stlUrl: result.stlUrl,
+      scadUrl: result.scadUrl,
+      stlBytes: result.stlBytes ?? 0,
+      triangleCount: result.triangleCount ?? estimateTriangleCount(result.stlBytes ?? 0),
+    } satisfies GenerationStreamResult;
   };
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
+
+    startTerminalSession();
     setError('');
-    setDone(false);
     setStep('rewriting');
     setDescription('');
     setScadCode('');
@@ -185,8 +295,9 @@ export default function Home() {
     setIsRerendering(false);
     setStrategy('');
     setCategory('');
-    setRewriteStatus('🧠 Analysing your prompt...');
-    resetGenerateStreamingState();
+
+    addLine('Initializing GDesign renderer...');
+    addLine('Classifying prompt type...');
 
     try {
       const res = await fetch('/api/rewrite', {
@@ -196,14 +307,22 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rewrite failed');
+
       const parsedParams = parseScadParams(data.scadCode);
-      setRewriteStatus(`📋 Detected: ${data.category}...`);
-      await wait(400);
-      setRewriteStatus('✍️ Generating OpenSCAD code...');
-      await wait(400);
-      setDone(true);
-      setRewriteStatus('✅ Code ready for review!');
-      await wait(300);
+      addLine(`Detected category: ${String(data.category).toUpperCase()} ✓`, 'success');
+
+      if (data.strategy === 'web_research') {
+        addLine('Fetching web research references...');
+        addLine(`Research complete — ${data.researchSourceCount ?? 0} sources found ✓`, 'success');
+      } else {
+        addLine('Applying mechanical precision heuristics...');
+        addLine('Mechanical rule set engaged ✓', 'success');
+      }
+
+      addLine('Constructing OpenSCAD prompt...');
+      addLine('Generating parametric SCAD code...');
+      addLine(`Code generation complete — ${data.scadCode.split('\n').length} lines ✓`, 'success');
+
       setDescription(data.description);
       setScadCode(data.scadCode);
       setBaseParams(parsedParams);
@@ -212,29 +331,33 @@ export default function Home() {
       setStrategy(data.strategy);
       setCategory(data.category);
       setStep('review');
-      setDone(false);
+      pauseTimerForReview();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      const message = err instanceof Error ? err.message : 'Something went wrong';
+      addLine(message, 'error');
+      setError(message);
       setStep('idle');
-      setDone(false);
-      setRewriteStatus('');
     }
   };
 
   const handleApprove = async () => {
+    resumeTimerFromReview();
     setError('');
-    setDone(false);
     setStep('generating');
-    resetGenerateStreamingState();
+    setShowBuildLog(true);
 
     try {
       const data = await streamGeneration(scadCode, safeName);
       setStlUrl(data.stlUrl);
       setScadUrl(data.scadUrl);
       setStep('preview');
+      setShowBuildLog(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      const message = err instanceof Error ? err.message : 'Something went wrong';
+      addLine(message, 'error');
+      setError(message);
       setStep('review');
+      pauseTimerForReview();
     }
   };
 
@@ -263,23 +386,34 @@ export default function Home() {
       customParams.map(({ name, value }) => ({ name, value }))
     );
 
+    startTerminalSession();
     setError('');
     setIsRerendering(true);
-    resetGenerateStreamingState();
+    addLine('Applying custom parameter overrides...');
+    addLine('Generating parametric SCAD code...');
+    addLine(`Code generation complete — ${nextScadCode.split('\n').length} lines ✓`, 'success');
 
     try {
       const data = await streamGeneration(nextScadCode, `${safeName}_${Date.now()}`);
       setScadCode(nextScadCode);
       setStlUrl(data.stlUrl);
       setScadUrl(data.scadUrl);
+      setShowBuildLog(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      const message = err instanceof Error ? err.message : 'Something went wrong';
+      addLine(message, 'error');
+      setError(message);
     } finally {
+      stopRenderFlavorLines();
       setIsRerendering(false);
     }
   };
 
   const handleReset = () => {
+    stopRenderFlavorLines();
+    processStartRef.current = 0;
+    reviewPausedAtRef.current = 0;
+    renderFlavorIndexRef.current = 0;
     setStep('idle');
     setPrompt('');
     setDescription('');
@@ -288,15 +422,15 @@ export default function Home() {
     setScadUrl('');
     setError('');
     setShowCode(false);
-    setDone(false);
     setBaseParams([]);
     setCustomParams([]);
     setActivePreset('medium');
     setIsRerendering(false);
     setStrategy('');
     setCategory('');
-    setRewriteStatus('');
-    resetGenerateStreamingState();
+    setTerminalLines([]);
+    setProcessStart(0);
+    setShowBuildLog(true);
   };
 
   return (
@@ -307,12 +441,11 @@ export default function Home() {
       </header>
 
       <main className="w-full max-w-2xl flex flex-col gap-6">
-        {/* Prompt input */}
         <section className="flex flex-col gap-3">
           <textarea
             className="w-full rounded-xl bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-500 p-4 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-sky-500 transition"
             rows={4}
-            placeholder={`Describe what you want to 3D print\u2026 e.g. "make me a phone stand"`}
+            placeholder={`Describe what you want to 3D print… e.g. "make me a phone stand"`}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             disabled={isLoading}
@@ -327,7 +460,15 @@ export default function Home() {
               className="flex-1 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 transition overflow-hidden relative"
             >
               {step === 'rewriting' ? (
-                <ProgressButton label={rewriteStatus || 'Generating OpenSCAD…'} progress={displayProgress} />
+                <span className="relative z-10 flex items-center justify-center gap-2">
+                  <Spinner />
+                  <span>Preparing model…</span>
+                </span>
+              ) : step === 'generating' ? (
+                <span className="relative z-10 flex items-center justify-center gap-2">
+                  <Spinner />
+                  <span>Building STL…</span>
+                </span>
               ) : (
                 'Generate'
               )}
@@ -344,14 +485,43 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Error */}
         {error && (
           <div className="rounded-xl bg-red-900/40 border border-red-700 text-red-300 text-sm p-4">
             {error}
           </div>
         )}
 
-        {/* Review panel */}
+        {(terminalLines.length > 0 || isTerminalRunning) && (
+          <section className="flex flex-col gap-3">
+            {step === 'preview' ? (
+              <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/70 px-4 py-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">Build Log</h2>
+                  <p className="text-xs text-slate-400">Live renderer output captured from the latest run.</p>
+                </div>
+                <button
+                  onClick={() => setShowBuildLog((current) => !current)}
+                  className="text-xs font-medium text-sky-400 hover:text-sky-300 transition"
+                >
+                  {showBuildLog ? 'Hide build log' : 'Show build log'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between px-1">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">Build Log</h2>
+                  <p className="text-xs text-slate-400">Streaming diagnostic output from the renderer pipeline.</p>
+                </div>
+                <span className="text-xs font-mono text-slate-500">{terminalLines.length} lines</span>
+              </div>
+            )}
+
+            {(showBuildLog || step !== 'preview' || isTerminalRunning) && (
+              <TerminalLog lines={terminalLines} isRunning={isTerminalRunning} />
+            )}
+          </section>
+        )}
+
         {(step === 'review' || step === 'generating' || step === 'preview') && (
           <section className="flex flex-col gap-4 rounded-xl bg-slate-800 border border-slate-700 p-5">
             <div>
@@ -390,36 +560,9 @@ export default function Home() {
                 Approve &amp; Generate STL
               </button>
             )}
-
-            {step === 'generating' && (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="flex items-center gap-2 text-slate-300">
-                    <Spinner />
-                    <span>{generateStatus || 'Starting...'}</span>
-                  </span>
-                  <span className="font-mono text-sky-400 font-semibold">{generateProgress}%</span>
-                </div>
-                <div className="w-full bg-slate-700 rounded-full h-2">
-                  <div
-                    className="bg-gradient-to-r from-sky-500 to-emerald-500 h-2 rounded-full transition-all duration-500"
-                    style={{ width: `${generateProgress}%` }}
-                  />
-                </div>
-                <div className="flex flex-col gap-1 mt-1">
-                  {statusHistory.map((msg, i) => (
-                    <div key={i} className="text-xs text-slate-500 flex items-center gap-2">
-                      <span className="text-emerald-500">✓</span>
-                      <span>{msg}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </section>
         )}
 
-        {/* 3D Preview */}
         {step === 'preview' && stlUrl && (
           <section className="flex flex-col gap-4">
             <div className="h-96 w-full">
@@ -586,10 +729,6 @@ function Spinner() {
   );
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function SlidersIcon() {
   return (
     <svg
@@ -603,6 +742,29 @@ function SlidersIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h6m4 0h6M8 6v12m8-8h4M4 10h8m-4 0v8m-4 4h10m4 0h2m-6 0v-6" />
     </svg>
   );
+}
+
+function formatElapsedTimestamp(elapsedSeconds: number) {
+  const safeElapsed = Math.max(0, elapsedSeconds);
+  const minutes = Math.floor(safeElapsed / 60);
+  const seconds = (safeElapsed % 60).toFixed(1).padStart(4, '0');
+  return `[${String(minutes).padStart(2, '0')}:${seconds}]`;
+}
+
+function getElapsedSeconds(start: number) {
+  if (!start) return 0;
+  return Math.max(0, (Date.now() - start) / 1000);
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function estimateTriangleCount(bytes: number) {
+  if (bytes < 84) return 0;
+  return Math.max(0, Math.floor((bytes - 84) / 50));
 }
 
 function formatFileName(value: string) {

@@ -44,8 +44,17 @@ export async function POST(req: NextRequest) {
           rawData.byteOffset,
           rawData.byteOffset + rawData.byteLength
         ) as ArrayBuffer;
+        const triangleCount =
+          rawData.byteLength >= 84
+            ? new DataView(stlBuffer).getUint32(80, true)
+            : Math.max(0, Math.floor(Math.max(rawData.byteLength - 84, 0) / 50));
 
-        await send({ status: '✅ Render complete! Processing output...', progress: 75 });
+        await send({
+          status: '✅ Render complete! Processing output...',
+          progress: 75,
+          stlBytes: rawData.byteLength,
+          triangleCount,
+        });
 
         const scadPath = `${baseName}.scad`;
         await send({ status: '☁️ Uploading .scad file...', progress: 82 });
@@ -79,6 +88,8 @@ export async function POST(req: NextRequest) {
         await send({
           status: '🎉 Done! Loading preview...',
           progress: 100,
+          stlBytes: rawData.byteLength,
+          triangleCount,
           stlUrl: stlUrlData.publicUrl,
           scadUrl: scadUrlData.publicUrl,
         });

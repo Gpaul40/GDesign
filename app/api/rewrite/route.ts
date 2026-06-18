@@ -273,13 +273,23 @@ async function researchPrompt(prompt: string, category: Extract<Category, 'chara
         tools: WEB_SEARCH_TOOL,
       });
 
-      return buildGroundingContext(data) ?? (extractText(data) || null);
+      const metadata = data.candidates?.[0]?.groundingMetadata;
+      const sourceCount = new Set(
+        (metadata?.groundingChunks ?? [])
+          .map((chunk) => chunk.web?.title?.trim())
+          .filter((title): title is string => Boolean(title))
+      ).size;
+
+      return {
+        context: buildGroundingContext(data) ?? (extractText(data) || null),
+        sourceCount,
+      };
     });
 
     return result;
   } catch (error) {
     console.warn('[rewrite] grounded research fallback:', error);
-    return null;
+    return { context: null, sourceCount: 0 };
   }
 }
 
@@ -292,8 +302,9 @@ export async function POST(req: NextRequest) {
 
     const category = await classifyPrompt(prompt);
     const strategy = getStrategy(category);
-    const researchContext =
-      category === 'mechanical' ? null : await researchPrompt(prompt, category);
+    const researchResult =
+      category === 'mechanical' ? { context: null, sourceCount: 0 } : await researchPrompt(prompt, category);
+    const researchContext = researchResult.context;
 
     const { result: text } = await runGeminiWithRetry(async (model) => {
       const data = await fetchGemini(
@@ -326,6 +337,7 @@ export async function POST(req: NextRequest) {
       scadCode: parsed.scadCode,
       category,
       strategy,
+      researchSourceCount: researchResult.sourceCount,
     });
   } catch (err) {
     console.error('[rewrite] error:', err);
