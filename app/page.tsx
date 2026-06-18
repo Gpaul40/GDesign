@@ -14,14 +14,20 @@ const SIZE_PRESETS = [
 ] as const;
 
 type Step = 'idle' | 'rewriting' | 'review' | 'generating' | 'preview';
+type PromptCategory = 'character' | 'mechanical' | 'object';
+type GenerationStrategy = 'web_research' | 'mechanical_precision';
 
 function useProgress(active: boolean, duration: number, endAt = 92) {
   const [progress, setProgress] = useState(0);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    if (ref.current) clearInterval(ref.current);
+    if (resetRef.current) clearTimeout(resetRef.current);
+
     if (active) {
-      setProgress(0);
+      resetRef.current = setTimeout(() => setProgress(0), 0);
       const steps = 60;
       const interval = duration / steps;
       let current = 0;
@@ -35,10 +41,12 @@ function useProgress(active: boolean, duration: number, endAt = 92) {
         }
       }, interval);
     } else {
-      if (ref.current) clearInterval(ref.current);
-      setProgress(0);
+      resetRef.current = setTimeout(() => setProgress(0), 0);
     }
-    return () => { if (ref.current) clearInterval(ref.current); };
+    return () => {
+      if (ref.current) clearInterval(ref.current);
+      if (resetRef.current) clearTimeout(resetRef.current);
+    };
   }, [active, duration, endAt]);
 
   return progress;
@@ -58,6 +66,8 @@ export default function Home() {
   const [customParams, setCustomParams] = useState<ScadParam[]>([]);
   const [activePreset, setActivePreset] = useState<string>('medium');
   const [isRerendering, setIsRerendering] = useState(false);
+  const [strategy, setStrategy] = useState<GenerationStrategy | ''>('');
+  const [category, setCategory] = useState<PromptCategory | ''>('');
 
   const rewriteProgress = useProgress(step === 'rewriting', 15000, 92);
   const generateProgress = useProgress(step === 'generating', RENDER_DURATION, 92);
@@ -85,6 +95,8 @@ export default function Home() {
     setCustomParams([]);
     setActivePreset('medium');
     setIsRerendering(false);
+    setStrategy('');
+    setCategory('');
 
     try {
       const res = await fetch('/api/rewrite', {
@@ -102,6 +114,8 @@ export default function Home() {
         setBaseParams(parsedParams);
         setCustomParams(parsedParams);
         setActivePreset('medium');
+        setStrategy(data.strategy);
+        setCategory(data.category);
         setStep('review');
         setDone(false);
       }, 300);
@@ -203,6 +217,8 @@ export default function Home() {
     setCustomParams([]);
     setActivePreset('medium');
     setIsRerendering(false);
+    setStrategy('');
+    setCategory('');
   };
 
   return (
@@ -261,9 +277,16 @@ export default function Home() {
         {(step === 'review' || step === 'generating' || step === 'preview') && (
           <section className="flex flex-col gap-4 rounded-xl bg-slate-800 border border-slate-700 p-5">
             <div>
-              <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-1">
-                Model Description
-              </h2>
+              <div className="mb-1 flex items-center gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                  Model Description
+                </h2>
+                {strategy && (
+                  <span className="rounded-full border border-slate-600 bg-slate-900/80 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-slate-200">
+                    {getStrategyBadgeLabel(strategy, category)}
+                  </span>
+                )}
+              </div>
               <p className="text-slate-200 text-sm leading-relaxed">{description}</p>
             </div>
 
@@ -498,6 +521,14 @@ function formatFileName(value: string) {
     .slice(0, 40);
 
   return normalized || `model_${Date.now()}`;
+}
+
+function getStrategyBadgeLabel(strategy: GenerationStrategy, category: PromptCategory | '') {
+  if (strategy === 'mechanical_precision') {
+    return '⚙️ Mechanical Precision';
+  }
+
+  return category === 'character' || category === 'object' ? '🔍 Web Research' : '🔍 Web Research';
 }
 
 function formatParamName(name: string) {
