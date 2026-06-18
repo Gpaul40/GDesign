@@ -1,11 +1,40 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const STLViewer = dynamic(() => import('../components/STLViewer'), { ssr: false });
 
 type Step = 'idle' | 'rewriting' | 'review' | 'generating' | 'preview';
+
+function useProgress(active: boolean, duration: number, endAt = 92) {
+  const [progress, setProgress] = useState(0);
+  const ref = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (active) {
+      setProgress(0);
+      const steps = 60;
+      const interval = duration / steps;
+      let current = 0;
+      ref.current = setInterval(() => {
+        current += endAt / steps;
+        if (current >= endAt) {
+          if (ref.current) clearInterval(ref.current);
+          setProgress(endAt);
+        } else {
+          setProgress(Math.round(current));
+        }
+      }, interval);
+    } else {
+      if (ref.current) clearInterval(ref.current);
+      setProgress(0);
+    }
+    return () => { if (ref.current) clearInterval(ref.current); };
+  }, [active, duration, endAt]);
+
+  return progress;
+}
 
 export default function Home() {
   const [prompt, setPrompt] = useState('');
@@ -16,10 +45,21 @@ export default function Home() {
   const [scadUrl, setScadUrl] = useState('');
   const [error, setError] = useState('');
   const [showCode, setShowCode] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const rewriteProgress = useProgress(step === 'rewriting', 15000, 92);
+  const generateProgress = useProgress(step === 'generating', 45000, 92);
+
+  const displayProgress = step === 'rewriting'
+    ? (done ? 100 : rewriteProgress)
+    : step === 'generating'
+    ? (done ? 100 : generateProgress)
+    : 0;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
     setError('');
+    setDone(false);
     setStep('rewriting');
     setDescription('');
     setScadCode('');
@@ -34,17 +74,23 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rewrite failed');
-      setDescription(data.description);
-      setScadCode(data.scadCode);
-      setStep('review');
+      setDone(true);
+      setTimeout(() => {
+        setDescription(data.description);
+        setScadCode(data.scadCode);
+        setStep('review');
+        setDone(false);
+      }, 300);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
       setStep('idle');
+      setDone(false);
     }
   };
 
   const handleApprove = async () => {
     setError('');
+    setDone(false);
     setStep('generating');
 
     const safeName = prompt
@@ -61,12 +107,17 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
-      setStlUrl(data.stlUrl);
-      setScadUrl(data.scadUrl);
-      setStep('preview');
+      setDone(true);
+      setTimeout(() => {
+        setStlUrl(data.stlUrl);
+        setScadUrl(data.scadUrl);
+        setStep('preview');
+        setDone(false);
+      }, 300);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
       setStep('review');
+      setDone(false);
     }
   };
 
@@ -79,7 +130,10 @@ export default function Home() {
     setScadUrl('');
     setError('');
     setShowCode(false);
+    setDone(false);
   };
+
+  const isLoading = step === 'rewriting' || step === 'generating';
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center px-4 py-12">
@@ -97,7 +151,7 @@ export default function Home() {
             placeholder={`Describe what you want to 3D print\u2026 e.g. "make me a phone stand"`}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            disabled={step === 'rewriting' || step === 'generating'}
+            disabled={isLoading}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleGenerate();
             }}
@@ -105,13 +159,11 @@ export default function Home() {
           <div className="flex gap-3">
             <button
               onClick={handleGenerate}
-              disabled={!prompt.trim() || step === 'rewriting' || step === 'generating'}
-              className="flex-1 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 transition"
+              disabled={!prompt.trim() || isLoading}
+              className="flex-1 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 transition overflow-hidden relative"
             >
               {step === 'rewriting' ? (
-                <span className="flex items-center justify-center gap-2">
-                  <Spinner /> Generating OpenSCAD…
-                </span>
+                <ProgressButton label="Generating OpenSCAD…" progress={displayProgress} />
               ) : (
                 'Generate'
               )}
@@ -119,7 +171,8 @@ export default function Home() {
             {step !== 'idle' && (
               <button
                 onClick={handleReset}
-                className="rounded-xl border border-slate-600 hover:border-slate-400 text-slate-400 hover:text-slate-200 text-sm px-4 transition"
+                disabled={isLoading}
+                className="rounded-xl border border-slate-600 hover:border-slate-400 text-slate-400 hover:text-slate-200 text-sm px-4 transition disabled:opacity-40"
               >
                 Reset
               </button>
@@ -168,8 +221,17 @@ export default function Home() {
             )}
 
             {step === 'generating' && (
-              <div className="flex items-center gap-2 text-slate-400 text-sm">
-                <Spinner /> Rendering STL and uploading…
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between text-sm text-slate-400">
+                  <span className="flex items-center gap-2"><Spinner /> Rendering STL and uploading…</span>
+                  <span className="font-mono text-sky-400 font-semibold">{displayProgress}%</span>
+                </div>
+                <div className="w-full bg-slate-700 rounded-full h-1.5">
+                  <div
+                    className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
+                    style={{ width: `${displayProgress}%` }}
+                  />
+                </div>
               </div>
             )}
           </section>
@@ -206,6 +268,16 @@ export default function Home() {
   );
 }
 
+function ProgressButton({ label, progress }: { label: string; progress: number }) {
+  return (
+    <span className="flex items-center justify-center gap-2 relative z-10">
+      <Spinner />
+      <span>{label}</span>
+      <span className="font-mono text-sky-200 font-semibold">{progress}%</span>
+    </span>
+  );
+}
+
 function Spinner() {
   return (
     <svg
@@ -223,4 +295,3 @@ function Spinner() {
     </svg>
   );
 }
-
