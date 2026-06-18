@@ -21,63 +21,22 @@ export async function POST(req: NextRequest) {
     });
 
     const text = response.text?.trim() ?? '';
-
-    // Strip any accidental markdown fences
     const cleaned = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
 
     let parsed: { description: string; scadCode: string };
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      return NextResponse.json(
-        { error: 'Gemini returned invalid JSON', raw: cleaned },
-        { status: 502 }
-      );
+      return NextResponse.json({ error: 'Gemini returned invalid JSON', raw: cleaned }, { status: 502 });
     }
 
     if (!parsed.description || !parsed.scadCode) {
-      return NextResponse.json(
-        { error: 'Gemini response missing required fields', raw: cleaned },
-        { status: 502 }
-      );
+      return NextResponse.json({ error: 'Gemini response missing required fields', raw: cleaned }, { status: 502 });
     }
 
     return NextResponse.json({ description: parsed.description, scadCode: parsed.scadCode });
   } catch (err) {
     console.error('[rewrite] error:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Unknown error' },
-      { status: 500 }
-    );
-  }
-}
-
-    // Strip any accidental markdown fences
-    const cleaned = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-
-    let parsed: { description: string; scadCode: string };
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      return NextResponse.json(
-        { error: 'Gemini returned invalid JSON', raw: cleaned },
-        { status: 502 }
-      );
-    }
-
-    if (!parsed.description || !parsed.scadCode) {
-      return NextResponse.json(
-        { error: 'Gemini response missing required fields', raw: cleaned },
-        { status: 502 }
-      );
-    }
-
-    return NextResponse.json({ description: parsed.description, scadCode: parsed.scadCode });
-  } catch (err) {
-    console.error('[rewrite] error:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Unknown error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }
 }
