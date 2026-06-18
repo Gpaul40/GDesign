@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
     }
 
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.0-flash',
       systemInstruction:
         'You are an expert OpenSCAD programmer. Given a plain English description of a 3D object, return a JSON object with two fields: "description" (a clear technical description of the model) and "scadCode" (valid, working OpenSCAD code that creates the described object). Only return valid JSON, no markdown, no code fences.',
     });
