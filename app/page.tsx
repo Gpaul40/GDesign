@@ -138,8 +138,8 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center px-4 py-12">
       <header className="mb-10 text-center">
-        <h1 className="text-4xl font-bold tracking-tight text-white">GDesign</h1>
-        <p className="mt-2 text-slate-400 text-sm">Turn plain English into 3D-printable models</p>
+        <img src="/logo.png" alt="GDesign" className="mx-auto w-64 h-auto" />
+        <p className="mt-1 text-slate-400 text-xs tracking-widest uppercase">Prompt CAD. Get Designs.</p>
       </header>
 
       <main className="w-full max-w-2xl flex flex-col gap-6">
