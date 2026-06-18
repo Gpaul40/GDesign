@@ -2,8 +2,16 @@
 
 import dynamic from 'next/dynamic';
 import { useState, useEffect, useRef } from 'react';
+import { applyScadParams, parseScadParams, type ScadParam } from '../lib/scadParams';
 
 const STLViewer = dynamic(() => import('../components/STLViewer'), { ssr: false });
+const RENDER_DURATION = 45000;
+const SIZE_PRESETS = [
+  { id: 'small', label: 'Small 0.75x', scale: 0.75 },
+  { id: 'medium', label: 'Medium 1x', scale: 1 },
+  { id: 'large', label: 'Large 1.5x', scale: 1.5 },
+  { id: 'xl', label: 'XL 2x', scale: 2 },
+] as const;
 
 type Step = 'idle' | 'rewriting' | 'review' | 'generating' | 'preview';
 
@@ -46,15 +54,23 @@ export default function Home() {
   const [error, setError] = useState('');
   const [showCode, setShowCode] = useState(false);
   const [done, setDone] = useState(false);
+  const [baseParams, setBaseParams] = useState<ScadParam[]>([]);
+  const [customParams, setCustomParams] = useState<ScadParam[]>([]);
+  const [activePreset, setActivePreset] = useState<string>('medium');
+  const [isRerendering, setIsRerendering] = useState(false);
 
   const rewriteProgress = useProgress(step === 'rewriting', 15000, 92);
-  const generateProgress = useProgress(step === 'generating', 45000, 92);
+  const generateProgress = useProgress(step === 'generating', RENDER_DURATION, 92);
+  const rerenderProgress = useProgress(isRerendering, RENDER_DURATION, 92);
 
   const displayProgress = step === 'rewriting'
     ? (done ? 100 : rewriteProgress)
     : step === 'generating'
     ? (done ? 100 : generateProgress)
     : 0;
+
+  const safeName = formatFileName(prompt);
+  const isLoading = step === 'rewriting' || step === 'generating' || isRerendering;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
@@ -65,6 +81,10 @@ export default function Home() {
     setScadCode('');
     setStlUrl('');
     setScadUrl('');
+    setBaseParams([]);
+    setCustomParams([]);
+    setActivePreset('medium');
+    setIsRerendering(false);
 
     try {
       const res = await fetch('/api/rewrite', {
@@ -74,10 +94,14 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rewrite failed');
+      const parsedParams = parseScadParams(data.scadCode);
       setDone(true);
       setTimeout(() => {
         setDescription(data.description);
         setScadCode(data.scadCode);
+        setBaseParams(parsedParams);
+        setCustomParams(parsedParams);
+        setActivePreset('medium');
         setStep('review');
         setDone(false);
       }, 300);
@@ -92,12 +116,6 @@ export default function Home() {
     setError('');
     setDone(false);
     setStep('generating');
-
-    const safeName = prompt
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .slice(0, 40);
 
     try {
       const res = await fetch('/api/generate', {
@@ -121,6 +139,56 @@ export default function Home() {
     }
   };
 
+  const handlePresetSelect = (presetId: string, scale: number) => {
+    setActivePreset(presetId);
+    setCustomParams(
+      baseParams.map((param) => ({
+        ...param,
+        value: roundToStep(param.value * scale, getParamStep(param.value)),
+      }))
+    );
+  };
+
+  const handleParamChange = (name: string, value: number) => {
+    setActivePreset('');
+    setCustomParams((current) =>
+      current.map((param) => (param.name === name ? { ...param, value } : param))
+    );
+  };
+
+  const handleRerender = async () => {
+    if (!customParams.length) return;
+
+    const nextScadCode = applyScadParams(
+      scadCode,
+      customParams.map(({ name, value }) => ({ name, value }))
+    );
+
+    setError('');
+    setIsRerendering(true);
+
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scadCode: nextScadCode,
+          fileName: `${safeName}_${Date.now()}`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Re-render failed');
+
+      setScadCode(nextScadCode);
+      setStlUrl(data.stlUrl);
+      setScadUrl(data.scadUrl);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setIsRerendering(false);
+    }
+  };
+
   const handleReset = () => {
     setStep('idle');
     setPrompt('');
@@ -131,9 +199,11 @@ export default function Home() {
     setError('');
     setShowCode(false);
     setDone(false);
+    setBaseParams([]);
+    setCustomParams([]);
+    setActivePreset('medium');
+    setIsRerendering(false);
   };
-
-  const isLoading = step === 'rewriting' || step === 'generating';
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center px-4 py-12">
@@ -263,6 +333,114 @@ export default function Home() {
             </div>
           </section>
         )}
+
+        {step === 'preview' && (
+          <section className="flex flex-col gap-5 rounded-xl bg-slate-800 border border-slate-700 p-5">
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-slate-900/80 border border-slate-700 p-2 text-sky-400">
+                <SlidersIcon />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">Customize Model</h2>
+                <p className="text-xs text-slate-400">Tune the detected OpenSCAD parameters and render a new STL.</p>
+              </div>
+            </div>
+
+            {customParams.length > 0 ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  {SIZE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      onClick={() => handlePresetSelect(preset.id, preset.scale)}
+                      disabled={isRerendering}
+                      className={`rounded-lg border px-3 py-2 text-sm transition ${
+                        activePreset === preset.id
+                          ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                          : 'border-slate-600 bg-slate-900/60 text-slate-300 hover:border-slate-500 hover:text-slate-100'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  {customParams.map((param) => {
+                    const baseValue = baseParams.find((baseParam) => baseParam.name === param.name)?.value ?? param.value;
+                    const stepSize = getParamStep(baseValue);
+                    const magnitude = Math.max(Math.abs(baseValue), 1);
+                    const minValue = Math.max(0, roundToStep(magnitude * 0.25, stepSize));
+                    const maxValue = Math.max(minValue + stepSize, roundToStep(magnitude * 4, stepSize));
+
+                    return (
+                      <div key={param.name} className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+                        <div className="mb-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <label className="text-sm font-medium text-slate-200">{formatParamName(param.name)}</label>
+                            <span className="text-xs font-mono text-sky-300">{formatParamValue(param.value)}</span>
+                          </div>
+                          {param.comment && (
+                            <p className="mt-1 text-xs text-slate-500">{param.comment}</p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="range"
+                            min={minValue}
+                            max={maxValue}
+                            step={stepSize}
+                            value={param.value}
+                            onChange={(e) => handleParamChange(param.name, Number(e.target.value))}
+                            disabled={isRerendering}
+                            className="h-2 flex-1 cursor-pointer appearance-none rounded-lg bg-slate-700 accent-sky-500 disabled:cursor-not-allowed"
+                          />
+                          <input
+                            type="number"
+                            min={minValue}
+                            max={maxValue}
+                            step={stepSize}
+                            value={param.value}
+                            onChange={(e) => {
+                              const nextValue = Number(e.target.value);
+                              if (Number.isFinite(nextValue)) {
+                                handleParamChange(param.name, nextValue);
+                              }
+                            }}
+                            disabled={isRerendering}
+                            className="w-24 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={handleRerender}
+                    disabled={isRerendering}
+                    className="self-start rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-6 py-2.5 transition overflow-hidden relative"
+                  >
+                    {isRerendering ? (
+                      <ProgressButton label="Re-rendering…" progress={rerenderProgress} />
+                    ) : (
+                      'Re-render'
+                    )}
+                  </button>
+                  {isRerendering && (
+                    <p className="text-xs text-slate-400">Rendering updated geometry and refreshing the preview…</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 text-sm text-slate-400">
+                No numeric top-level OpenSCAD parameters were detected in this model.
+              </div>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );
@@ -294,4 +472,49 @@ function Spinner() {
       />
     </svg>
   );
+}
+
+function SlidersIcon() {
+  return (
+    <svg
+      className="h-5 w-5"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth="1.8"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h6m4 0h6M8 6v12m8-8h4M4 10h8m-4 0v8m-4 4h10m4 0h2m-6 0v-6" />
+    </svg>
+  );
+}
+
+function formatFileName(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+
+  return normalized || `model_${Date.now()}`;
+}
+
+function formatParamName(name: string) {
+  return name
+    .replace(/^\$/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getParamStep(value: number) {
+  return Number.isInteger(value) && Math.abs(value) >= 10 ? 1 : 0.5;
+}
+
+function roundToStep(value: number, step: number) {
+  return Number((Math.round(value / step) * step).toFixed(step === 1 ? 0 : 2));
+}
+
+function formatParamValue(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
 }
