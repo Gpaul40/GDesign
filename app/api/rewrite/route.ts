@@ -5,6 +5,10 @@ const WEB_SEARCH_TOOL: Array<{ google_search: Record<string, never> }> = [{ goog
 
 type Category = 'character' | 'mechanical' | 'object';
 type Strategy = 'web_research' | 'mechanical_precision';
+type SelectedImage = {
+  url: string;
+  title: string;
+};
 
 type GeminiPart = {
   text?: string;
@@ -229,21 +233,41 @@ function buildGroundingContext(data: GeminiResponse) {
   return sections.length > 0 ? sections.join('\n') : null;
 }
 
+function buildSelectedImagesContext(selectedImages: SelectedImage[]) {
+  if (!selectedImages.length) return null;
+
+  return `The user has selected these reference images as accurate representations of what they want:
+${selectedImages.map((img) => `- ${img.title}: ${img.url}`).join('\n')}
+
+Use these images as visual reference to refine and improve the model description. Focus on the specific visual characteristics visible in these references — proportions, distinctive features, style, materials. Generate improved OpenSCAD code that better matches these references.`;
+}
+
 function buildGenerationPrompt(
   prompt: string,
   category: Category,
   strategy: Strategy,
-  researchContext: string | null
+  researchContext: string | null,
+  selectedImages: SelectedImage[]
 ) {
-  return [
+  const sections = [
     `User request: "${prompt}"`,
     `Detected category: ${category}`,
     `Generation strategy: ${strategy}`,
     researchContext
       ? `Grounded research findings:\n${researchContext}\nUse these references when choosing dimensions, proportions, and distinguishing features.`
       : 'Grounded research findings: none available. Use sound real-world assumptions and stay print-ready.',
-    'Return JSON with exactly "description" and "scadCode".',
-  ].join('\n\n');
+  ];
+
+  const selectedImagesContext = buildSelectedImagesContext(selectedImages);
+  if (selectedImagesContext) {
+    sections.push(selectedImagesContext);
+    sections.push(
+      'This is a refinement pass. Improve the prior concept with the selected visual references while keeping the result manufacturable and parametric.'
+    );
+  }
+
+  sections.push('Return JSON with exactly "description" and "scadCode".');
+  return sections.join('\n\n');
 }
 
 async function classifyPrompt(prompt: string) {
@@ -293,14 +317,34 @@ async function researchPrompt(prompt: string, category: Extract<Category, 'chara
   }
 }
 
+function parseSelectedImages(value: unknown): SelectedImage[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const candidate = entry as Record<string, unknown>;
+      return typeof candidate.url === 'string' && typeof candidate.title === 'string'
+        ? { url: candidate.url, title: candidate.title }
+        : null;
+    })
+    .filter((entry): entry is SelectedImage => Boolean(entry));
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const { prompt } = await req.json();
-    if (!prompt || typeof prompt !== 'string') {
+    const body = await req.json();
+    const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+    const selectedImages = parseSelectedImages(body?.selectedImages);
+
+    if (!prompt) {
       return NextResponse.json({ error: 'Prompt is required' }, { status: 400 });
     }
 
-    const category = await classifyPrompt(prompt);
+    const category =
+      typeof body?.category === 'string' && body.category.trim()
+        ? normalizeCategory(body.category)
+        : await classifyPrompt(prompt);
     const strategy = getStrategy(category);
     const researchResult =
       category === 'mechanical' ? { context: null, sourceCount: 0 } : await researchPrompt(prompt, category);
@@ -309,7 +353,7 @@ export async function POST(req: NextRequest) {
     const { result: text } = await runGeminiWithRetry(async (model) => {
       const data = await fetchGemini(
         model,
-        buildGenerationPrompt(prompt, category, strategy, researchContext),
+        buildGenerationPrompt(prompt, category, strategy, researchContext, selectedImages),
         {
           systemInstruction: getGenerationSystemPrompt(category),
         }

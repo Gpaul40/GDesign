@@ -22,7 +22,7 @@ const RENDER_FLAVOR_LINES = [
   'Calculating bounding volumes...',
 ] as const;
 
-type Step = 'idle' | 'rewriting' | 'review' | 'generating' | 'preview';
+type Step = 'idle' | 'rewriting' | 'image-select' | 'refining' | 'review' | 'generating' | 'preview';
 type PromptCategory = 'character' | 'mechanical' | 'object';
 type GenerationStrategy = 'web_research' | 'mechanical_precision';
 type GenerationStreamEvent = {
@@ -39,6 +39,11 @@ type GenerationStreamResult = {
   scadUrl: string;
   stlBytes: number;
   triangleCount: number;
+};
+type ReferenceImage = {
+  url: string;
+  title: string;
+  source: string;
 };
 
 function useProgress(active: boolean, duration: number, endAt = 92) {
@@ -94,6 +99,10 @@ export default function Home() {
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [processStart, setProcessStart] = useState(0);
   const [showBuildLog, setShowBuildLog] = useState(true);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [loadingImages, setLoadingImages] = useState(false);
+  const [refinedImageCount, setRefinedImageCount] = useState(0);
 
   const processStartRef = useRef(0);
   const reviewPausedAtRef = useRef(0);
@@ -103,8 +112,9 @@ export default function Home() {
   const rerenderProgress = useProgress(isRerendering, RENDER_DURATION, 92);
 
   const safeName = formatFileName(prompt);
-  const isTerminalRunning = step === 'rewriting' || step === 'generating' || isRerendering;
-  const isLoading = isTerminalRunning;
+  const isTerminalRunning =
+    step === 'rewriting' || step === 'refining' || step === 'generating' || isRerendering;
+  const isLoading = isTerminalRunning || loadingImages;
 
   const stopRenderFlavorLines = () => {
     if (renderFlavorIntervalRef.current) {
@@ -279,6 +289,12 @@ export default function Home() {
     } satisfies GenerationStreamResult;
   };
 
+  const toggleImageSelection = (url: string) => {
+    setSelectedImages((current) =>
+      current.includes(url) ? current.filter((entry) => entry !== url) : [...current, url]
+    );
+  };
+
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
 
@@ -295,6 +311,10 @@ export default function Home() {
     setIsRerendering(false);
     setStrategy('');
     setCategory('');
+    setReferenceImages([]);
+    setSelectedImages([]);
+    setLoadingImages(false);
+    setRefinedImageCount(0);
 
     addLine('Initializing GDesign renderer...');
     addLine('Classifying prompt type...');
@@ -330,13 +350,81 @@ export default function Home() {
       setActivePreset('medium');
       setStrategy(data.strategy);
       setCategory(data.category);
-      setStep('review');
+      setStep('image-select');
+      setLoadingImages(true);
+      addLine('Searching for reference images...');
+
+      try {
+        const imagesRes = await fetch('/api/images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: prompt.trim(), category: data.category }),
+        });
+        const imagesData = await imagesRes.json();
+        if (!imagesRes.ok) throw new Error(imagesData.error || 'Image search failed');
+
+        const images = Array.isArray(imagesData.images) ? imagesData.images : [];
+        setReferenceImages(images);
+        addLine(`Found ${images.length} reference images ✓`, 'success');
+      } catch (imageErr) {
+        const imageMessage = imageErr instanceof Error ? imageErr.message : 'Image search failed';
+        setReferenceImages([]);
+        addLine(`${imageMessage} — continuing without references`, 'error');
+      } finally {
+        setLoadingImages(false);
+      }
+
       pauseTimerForReview();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Something went wrong';
       addLine(message, 'error');
       setError(message);
       setStep('idle');
+      setLoadingImages(false);
+    }
+  };
+
+  const handleRefineWithImages = async () => {
+    const selected = referenceImages.filter((img) => selectedImages.includes(img.url));
+    if (!selected.length) return;
+
+    resumeTimerFromReview();
+    setError('');
+    setStep('refining');
+    addLine('Refining model with selected reference images...', 'info');
+    addLine(`Processing ${selected.length} reference image(s)...`, 'info');
+
+    try {
+      const res = await fetch('/api/rewrite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          selectedImages: selected.map(({ url, title }) => ({ url, title })),
+          category,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Refinement failed');
+
+      const parsedParams = parseScadParams(data.scadCode);
+      addLine(`Refined description generated — ${data.scadCode.split('\n').length} lines ✓`, 'success');
+      setDescription(data.description);
+      setScadCode(data.scadCode);
+      setBaseParams(parsedParams);
+      setCustomParams(parsedParams);
+      setActivePreset('medium');
+      setStrategy(data.strategy);
+      setCategory(data.category);
+      setRefinedImageCount(selected.length);
+      setStep('review');
+      pauseTimerForReview();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Something went wrong';
+      addLine(message, 'error');
+      setError(message);
+      setStep('image-select');
+      pauseTimerForReview();
     }
   };
 
@@ -431,6 +519,10 @@ export default function Home() {
     setTerminalLines([]);
     setProcessStart(0);
     setShowBuildLog(true);
+    setReferenceImages([]);
+    setSelectedImages([]);
+    setLoadingImages(false);
+    setRefinedImageCount(0);
   };
 
   return (
@@ -459,10 +551,10 @@ export default function Home() {
               disabled={!prompt.trim() || isLoading}
               className="flex-1 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 transition overflow-hidden relative"
             >
-              {step === 'rewriting' ? (
+              {step === 'rewriting' || step === 'refining' ? (
                 <span className="relative z-10 flex items-center justify-center gap-2">
                   <Spinner />
-                  <span>Preparing model…</span>
+                  <span>{step === 'refining' ? 'Refining model…' : 'Preparing model…'}</span>
                 </span>
               ) : step === 'generating' ? (
                 <span className="relative z-10 flex items-center justify-center gap-2">
@@ -522,6 +614,80 @@ export default function Home() {
           </section>
         )}
 
+        {step === 'image-select' && (
+          <section className="flex flex-col gap-4 rounded-xl bg-slate-800 border border-slate-700 p-5">
+            <div>
+              <h2 className="text-sm font-semibold text-white mb-1">Reference Images</h2>
+              <p className="text-xs text-slate-400">
+                Select the images that best match what you&apos;re looking for. We&apos;ll use these to refine
+                the model.
+              </p>
+            </div>
+
+            {referenceImages.length > 0 && (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+                {referenceImages.map((img) => {
+                  const isSelected = selectedImages.includes(img.url);
+
+                  return (
+                    <button
+                      key={img.url}
+                      onClick={() => toggleImageSelection(img.url)}
+                      className={`relative aspect-square overflow-hidden rounded-lg border-2 transition-all ${
+                        isSelected
+                          ? 'border-sky-500 ring-2 ring-sky-500/50'
+                          : 'border-slate-600 hover:border-slate-400'
+                      }`}
+                    >
+                      <img src={img.url} alt={img.title} className="h-full w-full object-cover" />
+                      {isSelected && (
+                        <div className="absolute inset-0 flex items-end justify-end bg-sky-500/20 p-2">
+                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-sky-500">
+                            <span className="text-xs text-white">✓</span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
+                        <p className="truncate text-xs text-white">{img.title}</p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-300">{img.source}</p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {loadingImages && (
+              <div className="py-4 text-center text-sm text-slate-400">Loading reference images...</div>
+            )}
+
+            {!loadingImages && referenceImages.length === 0 && (
+              <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-4 text-sm text-slate-400">
+                No reference images were found for this prompt. You can skip this step and continue with the
+                generated description.
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleRefineWithImages}
+                disabled={selectedImages.length === 0}
+                className="flex-1 rounded-xl bg-sky-600 py-2.5 text-sm font-medium text-white transition hover:bg-sky-500 disabled:opacity-40"
+              >
+                {selectedImages.length > 0
+                  ? `Use ${selectedImages.length} Selected Reference${selectedImages.length > 1 ? 's' : ''} →`
+                  : 'Select images above'}
+              </button>
+              <button
+                onClick={() => setStep('review')}
+                className="rounded-xl border border-slate-600 px-4 text-sm text-slate-400 transition hover:border-slate-400"
+              >
+                Skip →
+              </button>
+            </div>
+          </section>
+        )}
+
         {(step === 'review' || step === 'generating' || step === 'preview') && (
           <section className="flex flex-col gap-4 rounded-xl bg-slate-800 border border-slate-700 p-5">
             <div>
@@ -532,6 +698,11 @@ export default function Home() {
                 {strategy && (
                   <span className="rounded-full border border-slate-600 bg-slate-900/80 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-slate-200">
                     {getStrategyBadgeLabel(strategy, category)}
+                  </span>
+                )}
+                {refinedImageCount > 0 && (
+                  <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-sky-200">
+                    Refined with {refinedImageCount} image{refinedImageCount === 1 ? '' : 's'}
                   </span>
                 )}
               </div>
